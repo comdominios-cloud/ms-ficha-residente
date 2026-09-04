@@ -24,9 +24,9 @@ necesita algo de esta API, se pide via issue en vez de tocar el codigo.
 
 | Repositorio | Integrante | Rol |
 |---|---|---|
-| [ms-residentes](https://github.com/comdominios-cloud/ms-residentes) | @Osomar1705 | API con BD (Python) |
-| [ms-pagos](https://github.com/comdominios-cloud/ms-pagos) | *por asignar* | API con BD (Java) |
-| [ms-incidencias](https://github.com/comdominios-cloud/ms-incidencias) | *por asignar* | API con BD (Node.js) |
+| [ms-residentes](https://github.com/comdominios-cloud/ms-residentes) | @Osomar1705 | API con BD - Python |
+| [ms-pagos](https://github.com/comdominios-cloud/ms-pagos) | @sebastianperez72 | API con BD - Java |
+| [ms-incidencias](https://github.com/comdominios-cloud/ms-incidencias) | @fabianbot1331 | API con BD - lenguaje por definir |
 | [ms-ficha-residente](https://github.com/comdominios-cloud/ms-ficha-residente) | @Brisseth-raton | Backend / Infraestructura |
 | [web-condominio](https://github.com/comdominios-cloud/web-condominio) | @alxgr-08 | Frontend |
 | [ms-analitico](https://github.com/comdominios-cloud/ms-analitico) | @carloscondor1610 | Data Science |
