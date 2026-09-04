@@ -7,6 +7,8 @@ Microservicio **consumidor de APIs**, sin base de datos propia. Devuelve la
 
 ## Responsable
 
+[@Brisseth-raton](https://github.com/Brisseth-raton) — Backend / Infraestructura. Ver [INTEGRANTE.md](INTEGRANTE.md).
+
 Integrante a cargo de **backend / infraestructura**. Es el unico repositorio que
 integra a los demas: las 3 APIs con base de datos se desarrollan por separado y
 aqui se juntan por HTTP.
