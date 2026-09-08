@@ -8,7 +8,7 @@
 
 | VM | Cantidad | AMI | Que corre adentro |
 |----|----------|-----|-------------------|
-| **Produccion** | **2, gemelas** (misma AMI, distinta IP) | Ubuntu 22.04 | Los 5 microservicios como contenedores |
+| **Produccion** | **2, gemelas** (misma AMI, distinta IP) | Ubuntu 22.04 | Los 6 microservicios como contenedores |
 | **Base de datos** | 1 | Ubuntu 22.04 | **3 contenedores**: PostgreSQL, MySQL, MongoDB |
 | **Ingesta** | 1 | Ubuntu 22.04 | Los 3 contenedores Python de `ingesta-datos` |
 
@@ -44,12 +44,13 @@ El curso asigno el rango **9000-12000** para los microservicios.
 | ms-incidencias | 9003 | 3003 | por definir |
 | ms-ficha-residente | 9004 | 8004 | Python / FastAPI |
 | ms-analitico | 9005 | 8005 | Python / FastAPI |
+| ms-usuarios | 9006 | 8000 | Python / FastAPI |
 
 ### Bases de datos (VM de base de datos)
 
 | Motor | Puerto | Microservicio que la usa |
 |-------|--------|--------------------------|
-| PostgreSQL | 5432 | ms-residentes |
+| PostgreSQL | 5432 | ms-residentes (base `condominio_residentes`) **y** ms-usuarios (base `condominio_usuarios`) |
 | MySQL | 3306 | ms-pagos |
 | MongoDB | 27017 | ms-incidencias |
 
@@ -64,13 +65,13 @@ no a una IP suelta ni a internet entero.
 | Direccion | Puerto | Origen / Destino |
 |-----------|--------|------------------|
 | Entrada | 80, 443 | `0.0.0.0/0` (unico caso permitido: es el punto publico) |
-| Salida | 9001-9005 | SG de produccion |
+| Salida | 9001-9006 | SG de produccion |
 
 ### SG de la VM de produccion
 
 | Direccion | Puerto | Origen / Destino |
 |-----------|--------|------------------|
-| Entrada | 9001-9005 | SG del balanceador |
+| Entrada | 9001-9006 | SG del balanceador |
 | Entrada | 22 (SSH) | IP fija del equipo, nunca abierta |
 | Salida | 5432, 3306, 27017 | SG de la VM de base de datos |
 | Salida | 443 | `0.0.0.0/0` (pull de imagenes desde Docker Hub) |
@@ -112,6 +113,7 @@ dos VM de produccion hagan `pull` de la misma version.
 | `<org>/ms-incidencias` | `0.1.0` | @fabianbot1331 |
 | `<org>/ms-ficha-residente` | `0.1.0` | @Brisseth-raton |
 | `<org>/ms-analitico` | `0.1.0` | @carloscondor1610 |
+| `<org>/ms-usuarios` | `0.1.0` | @Osomar1705 |
 | `<org>/ingesta01..03` | `0.1.0` | @carloscondor1610 |
 
 - Cuenta / organizacion de Docker Hub: `TODO`
@@ -130,10 +132,12 @@ Completar a medida que se creen:
 | Bucket S3 | `TODO` | una carpeta por contenedor de ingesta |
 | Base de Glue | `condominio_db` | catalogo sobre el bucket |
 
-## Pendientes de confirmar con el ACL
+## Confirmado por el ACL (2026-09-08)
 
-1. Si la ingesta lee las bases **directamente** o a traves de las APIs. El
-   diagrama muestra conexion directa a las BDs, que es lo coherente con "pull del
-   100% de los registros".
-2. Que significa exactamente que "el contenedor de ingesta almacena en el
-   contenedor de base de datos" antes de subir a S3.
+1. La ingesta se conecta **directamente a las bases de datos**, no a los
+   endpoints de los microservicios. Cada contenedor de ingesta baja los datos
+   hacia adentro de si mismo, arma el archivo y desde ahi lo sube a S3.
+2. Los puertos de las bases quedan **reservados**: 5432, 3306 y 27017.
+3. **Usuarios debe ser su propio microservicio con su propia base**: por eso
+   existe `ms-usuarios` en el puerto 9006, con la base `condominio_usuarios`
+   dentro del mismo contenedor de PostgreSQL.
