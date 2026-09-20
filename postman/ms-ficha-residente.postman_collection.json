@@ -1,0 +1,265 @@
+{
+  "info": {
+    "name": "ms-ficha-residente | CS2032 Condominios",
+    "description": "Microservicio consumidor, SIN base de datos. Agrega la informacion de\nms-residentes, ms-pagos y ms-incidencias en una sola respuesta.\n\nLas llamadas a los tres servicios salen en paralelo. Cada bloque de la\nrespuesta indica si ese servicio estuvo disponible: si uno se cae, la\nficha se devuelve igual con esa seccion marcada. El campo 'completa'\ndice si los tres respondieron.\n\nEmpezar por '0. Estado / Estado de las dependencias' para ver que\nmicroservicios estan arriba.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:9004",
+      "description": "Cambiar por la URL del API Gateway al desplegar"
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Estado",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Este servicio no tiene base de datos: responder ya significa que esta sano."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 200\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Estado de las dependencias",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/dependencias/estado",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "dependencias",
+                "estado"
+              ]
+            },
+            "description": "Consulta los tres microservicios y dice cual esta arriba. Util antes de la demo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 200\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Ficha consolidada",
+      "item": [
+        {
+          "name": "Ficha del residente 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "1"
+              ]
+            },
+            "description": "Junta en una respuesta: datos del residente (ms-residentes), estado de cuenta, cuotas y pagos (ms-pagos), incidencias y reservas (ms-incidencias)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 200\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resumen del residente 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/1/resumen",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "1",
+                "resumen"
+              ]
+            },
+            "description": "Version reducida para tarjetas del frontend: nombre, unidad, edificio, deuda, incidencias abiertas y reservas proximas."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 200\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ficha de la unidad 1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/unidad/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "unidad",
+                "1"
+              ]
+            },
+            "description": "La unidad con todos sus residentes, su estado de cuenta, incidencias y reservas."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 200\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Casos de error (para la demo)",
+      "item": [
+        {
+          "name": "Residente inexistente -> 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/9999",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "9999"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 404\", function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Id invalido -> 422",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/0",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "0"
+              ]
+            },
+            "description": "El id debe ser mayor que cero; lo valida FastAPI antes de llamar a nadie."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 422\", function () { pm.response.to.have.status(422); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unidad inexistente -> 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/ficha/unidad/9999",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "ficha",
+                "unidad",
+                "9999"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Responde 404\", function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

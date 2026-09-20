@@ -1,0 +1,17 @@
+# Despliegue en la VM de PRODUCCION.
+#
+# Este microservicio no tiene base de datos: solo necesita alcanzar a los otros
+# tres. Como los cinco corren en la misma VM, las URL apuntan a la IP privada
+# de esa maquina con el puerto publicado de cada uno.
+#
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  ms-ficha-residente:
+    image: osomar/ms-ficha-residente:0.1.0
+    container_name: ms-ficha-residente
+    ports:
+      - "9004:8004"
+    env_file: .env
+    restart: unless-stopped
