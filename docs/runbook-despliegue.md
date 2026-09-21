@@ -3,7 +3,11 @@
 Guia pensada para desplegar **todo de una vez**, sin prueba y error, y gastando
 lo minimo de credito de AWS Academy.
 
-Leerla entera antes de empezar. Son unos 45 minutos si no hay que volver atras.
+Leerla entera antes de empezar. Son unos 45 minutos si no hay que volver atras,
+y menos si sobrevivieron la AMI y los security groups.
+
+**Empezar por el paso 0**: puede que varias cosas sigan existiendo y no haya
+que rehacerlas.
 
 ---
 
@@ -28,7 +32,65 @@ Tres reglas para que rinda:
 
 ---
 
-## Paso 0 — Que NO hay que crear
+## Paso 0 — Inventario: que sobrevivio y que esta gastando
+
+**Antes de crear nada**, revisar que quedo en la cuenta. Puede que varias cosas
+sigan ahi y no haya que rehacerlas, y puede que algo este cobrando sin que
+nadie lo use.
+
+### Lo que conviene que haya sobrevivido
+
+| Donde mirar | Que buscar | Si esta |
+|-------------|------------|---------|
+| EC2 > AMI | `condominio-ubuntu22-docker-v1` | No hay que rehacer la imagen: saltar ese paso |
+| EC2 > Security Groups | `sgc-alb`, `sgc-produccion`, `sgc-database`, `sgc-ingesta` | Revisar las reglas y reutilizarlos |
+| EC2 > Grupos de destino | `tg-residentes`, `tg-usuarios`, ... | Son gratis, se reutilizan registrando las instancias nuevas |
+| EC2 > Balanceadores | `alb-condominio` | Si vive, **no tocarlo**: conserva su DNS |
+| API Gateway | `api-condominio` | Solo hay que reapuntar la integracion si cambio el DNS del ALB |
+| EC2 > Instantaneas | snapshots del proyecto | Puede que la AMI se pueda recrear desde ahi |
+
+### Lo que hay que buscar porque esta gastando
+
+| Donde mirar | Que buscar | Que hacer |
+|-------------|------------|-----------|
+| EC2 > Balanceadores | balanceadores sin destinos o duplicados | **Eliminar los que no se usen**: cobran por hora aunque esten vacios |
+| EC2 > Volumenes | volumenes en estado `available` (sin instancia) | Eliminar: son discos huerfanos que se siguen pagando |
+| EC2 > Direcciones IP elasticas | IP sin asociar | **Eliminar**: una IP elastica sin usar cobra mas que asociada |
+| EC2 > Instancias | instancias `running` que no sean del proyecto | Los laboratorios viejos (`MV Pruebas`, `Miprimer`, `MV Desarrollo`) siguen consumiendo |
+| EC2 > Instantaneas | snapshots viejos | Eliminar los que no correspondan a la AMI del proyecto |
+
+> En una captura anterior se veian **tres instancias de laboratorios de clase**
+> corriendo en paralelo al proyecto: `Miprimer`, `MV Base de Datos` y
+> `MV Pruebas`. Si siguen ahi, apagarlas es lo primero.
+
+### Comprobacion rapida desde CloudShell
+
+```bash
+echo "--- instancias corriendo ---"
+aws ec2 describe-instances   --filters "Name=instance-state-name,Values=running"   --query "Reservations[].Instances[].[InstanceId,InstanceType,Tags[?Key=='Name']|[0].Value]"   --output table
+
+echo "--- balanceadores ---"
+aws elbv2 describe-load-balancers   --query "LoadBalancers[].[LoadBalancerName,DNSName,State.Code,Scheme]" --output table
+
+echo "--- volumenes huerfanos ---"
+aws ec2 describe-volumes --filters "Name=status,Values=available"   --query "Volumes[].[VolumeId,Size,CreateTime]" --output table
+
+echo "--- IP elasticas sin asociar ---"
+aws ec2 describe-addresses   --query "Addresses[?AssociationId==null].[PublicIp,AllocationId]" --output table
+
+echo "--- AMIs propias ---"
+aws ec2 describe-images --owners self   --query "Images[].[ImageId,Name,State]" --output table
+
+echo "--- security groups del proyecto ---"
+aws ec2 describe-security-groups   --query "SecurityGroups[?starts_with(GroupName,'sgc')].[GroupId,GroupName]" --output table
+```
+
+Con esa salida se sabe exactamente que rehacer y que reutilizar. **No crear
+nada antes de correrla.**
+
+---
+
+## Paso 1 — Que NO hay que crear
 
 Para no gastar de mas:
 
@@ -41,7 +103,7 @@ Para no gastar de mas:
 
 ---
 
-## Paso 1 — Las instancias
+## Paso 2 — Las instancias
 
 Tres, todas desde la AMI `condominio-ubuntu22-docker-v1`:
 
@@ -59,7 +121,7 @@ una existente: el enunciado pide dos maquinas gemelas desde esa imagen.
 
 ---
 
-## Paso 2 — Security Groups
+## Paso 3 — Security Groups
 
 Cuatro, y el orden importa porque se referencian entre si.
 
@@ -99,7 +161,7 @@ Cuatro, y el orden importa porque se referencian entre si.
 
 ---
 
-## Paso 3 — La VM de base de datos
+## Paso 4 — La VM de base de datos
 
 Entrar por SSH a `condominio-db-01` y pegar esto **completo**:
 
@@ -193,7 +255,7 @@ docker exec condominio-mysql mysql -ucondominio -p"$MYSQL_PASSWORD" condominio_p
 
 ---
 
-## Paso 4 — Las VM de produccion
+## Paso 5 — Las VM de produccion
 
 **Lo mismo en las dos maquinas.** Reemplazar `IP_PRIVADA_DB` por la IP privada
 de `condominio-db-01` y generar el secreto **una sola vez** para las dos.
@@ -305,7 +367,7 @@ imagenes.
 
 ---
 
-## Paso 5 — Balanceador y reglas
+## Paso 6 — Balanceador y reglas
 
 Target groups, uno por puerto, todos **HTTP** y con health check en la ruta
 que ya existe:
@@ -334,7 +396,7 @@ Reglas del listener HTTP:80, por orden de prioridad:
 
 ---
 
-## Paso 6 — API Gateway
+## Paso 7 — API Gateway
 
 Ya existe (`api-condominio`, `5y33fncgsh`). Si el balanceador cambio de DNS,
 hay que actualizar la integracion:
@@ -345,7 +407,7 @@ hay que actualizar la integracion:
 
 ---
 
-## Paso 7 — Verificar todo de una
+## Paso 8 — Verificar todo de una
 
 Desde cualquier maquina con internet:
 
@@ -361,7 +423,7 @@ momento**. Es lo que permite apagar todo despues sin perder la evidencia.
 
 ---
 
-## Paso 8 — Apagar para no gastar
+## Paso 9 — Apagar para no gastar
 
 Al terminar la sesion de trabajo:
 
@@ -370,7 +432,7 @@ EC2 > Instancias > seleccionar las 3 > Estado de la instancia > Detener
 ```
 
 **Detener, no terminar.** Detenida conserva el disco y los contenedores; si se
-termina, se pierde todo y hay que rehacer desde el paso 1.
+termina, se pierde todo y hay que rehacer desde el paso 2.
 
 Al volver a prenderlas:
 
