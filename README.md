@@ -47,7 +47,7 @@ de un integrante no bloquee al resto.
 | Lenguaje    | Python 3.12               |
 | Framework   | FastAPI                   |
 | Base de datos | **Ninguna** (por diseno) |
-| Cliente HTTP | httpx (asincrono)        |
+| Cliente HTTP | httpx (asincrono, en paralelo) |
 | Documentacion | Swagger-UI en `/docs`   |
 | Contenedor  | Docker                    |
 
@@ -71,22 +71,54 @@ Las bases de datos **no** entran en ese rango: PostgreSQL 5432, MySQL 3306,
 MongoDB 27017, alcanzables solo desde los Security Groups de la VM de produccion
 y la VM de ingesta.
 
-## Endpoints REST planificados
-
-> Andamiaje: aun no implementados.
+## Endpoints REST
 
 | # | Metodo | Ruta | Descripcion | Consumido por |
 |---|--------|------|-------------|---------------|
-| 1 | `GET` | `/ficha/{residente_id}` | Ficha completa: datos + estado de cuenta + incidencias + reservas | **frontend** |
-| 2 | `GET` | `/ficha/unidad/{unidad_id}` | Ficha consolidada de una unidad y todos sus residentes | **frontend** |
-| 3 | `GET` | `/ficha/{residente_id}/resumen` | Version reducida: nombre, unidad, deuda total, incidencias abiertas | frontend |
-| 4 | `GET` | `/dependencias/estado` | Estado de salud de los 3 microservicios consumidos | infra |
-| 5 | `GET` | `/health` | Health check del servicio | infra |
+| 1 | `GET` | `/ficha/{residente_id}` | Ficha completa: datos, estado de cuenta, cuotas, pagos, incidencias y reservas | **frontend** |
+| 2 | `GET` | `/ficha/unidad/{unidad_id}` | Ficha de una unidad y todos sus residentes | **frontend** |
+| 3 | `GET` | `/ficha/{residente_id}/resumen` | Version reducida: nombre, unidad, edificio, deuda, incidencias abiertas | frontend |
+| 4 | `GET` | `/dependencias/estado` | Estado de los tres microservicios que consume | infra |
+| 5 | `GET` | `/health` | Health check | infra |
 
-Los dos endpoints que consume directamente el **frontend** son
-`GET /ficha/{residente_id}` y `GET /ficha/unidad/{unidad_id}`.
+Documentacion interactiva: `http://<ip>:9004/docs` (Swagger-UI).
 
-Documentacion interactiva: `http://<ip-vm-produccion>:9004/docs` (Swagger-UI).
+## Como resuelve la agregacion
+
+Las llamadas a los tres microservicios salen **en paralelo** con
+`asyncio.gather`. Si se hicieran una detras de otra, la ficha tardaria la suma
+de las tres; asi tarda lo que tarde la mas lenta.
+
+### Degradacion controlada
+
+Cada bloque de la respuesta lleva su propio `disponible` y `error`:
+
+```json
+{
+  "residente_id": 1,
+  "unidad_id": 1,
+  "completa": false,
+  "residente":     { "disponible": true,  "datos": { "nombres": "Lucia", "...": "..." } },
+  "estado_cuenta": { "disponible": false, "error": "no se pudo contactar a ms-pagos" },
+  "incidencias":   { "disponible": false, "error": "no se pudo contactar a ms-incidencias" }
+}
+```
+
+Si un microservicio se cae, la ficha **se devuelve igual** con esa seccion
+marcada, en vez de fallar entera. El campo `completa` dice si los tres
+respondieron. Asi la caida de un servicio no arrastra a los otros dos.
+
+### Reintentos
+
+Un timeout o un 5xx se reintentan, con una espera creciente entre intentos: son
+fallas que pueden ser pasajeras. Un 404 o un 400 **no** se reintentan, porque
+volver a preguntar da el mismo resultado.
+
+### Rutas que usa para sondear
+
+`/dependencias/estado` consulta `/edificios`, `/cuotas` e `/incidencias` en vez
+de `/health`. Es a proposito: el balanceador solo enruta las rutas que tienen
+regla, y `/health` no la tiene.
 
 ## Variables de entorno
 
@@ -140,16 +172,36 @@ gemelas**, el mismo `.env` funciona en las dos.
 
 ```
 app/
-├── main.py       # instancia FastAPI (stub)
-├── routers/      # endpoints de la ficha
-├── clients/      # clientes httpx: residentes, pagos, incidencias
-├── schemas/      # esquemas Pydantic de la respuesta consolidada
-└── config/       # settings, URLs de los microservicios
+├── main.py          # instancia FastAPI y CORS
+├── config.py        # URLs de los tres microservicios
+├── routers/
+│   ├── ficha.py     # los 3 endpoints de ficha
+│   └── salud.py     # health y estado de dependencias
+├── clients/
+│   ├── base.py      # reintentos y manejo de fallas
+│   ├── residentes.py
+│   ├── pagos.py
+│   └── incidencias.py
+└── schemas/
+    └── ficha.py     # contratos de salida
+postman/
 tests/
 docs/
 └── infra.md      # VPC, Security Groups, VMs y mapa de puertos
 ```
 
+## Coleccion de Postman
+
+[postman/ms-ficha-residente.postman_collection.json](postman/ms-ficha-residente.postman_collection.json),
+8 requests verificados. Empezar por **`0. Estado / Estado de las dependencias`**
+para ver que microservicios estan arriba antes de pedir una ficha.
+
 ## Estado
 
-Andamiaje inicial. Sin endpoints ni logica de agregacion implementados.
+**Implementado y probado.** Los 5 endpoints funcionando, con llamadas en
+paralelo y degradacion controlada. Imagen publicada como
+`osomar/ms-ficha-residente:0.1.0`.
+
+Verificado contra `ms-residentes` real, con `ms-pagos` e `ms-incidencias`
+caidos a proposito: la ficha se devuelve con las secciones disponibles y las
+demas marcadas con su motivo.

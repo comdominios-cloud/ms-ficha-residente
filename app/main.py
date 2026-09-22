@@ -1,29 +1,43 @@
 """Punto de entrada de ms-ficha-residente.
 
-ANDAMIAJE: solo instancia la aplicacion FastAPI y expone Swagger-UI.
-Este microservicio NO tiene base de datos: su unica responsabilidad es
-consumir a ms-residentes, ms-pagos y ms-incidencias, y devolver la ficha
-consolidada del residente.
+Microservicio **sin base de datos**. Su unica responsabilidad es consumir a
+ms-residentes, ms-pagos y ms-incidencias, y devolver una ficha consolidada del
+residente.
+
+Cumple dos requisitos del curso a la vez: es el microservicio sin base de datos
+y el que consume a otros microservicios.
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import get_settings
+from app.routers import ficha, salud
+
+settings = get_settings()
 
 app = FastAPI(
     title="ms-ficha-residente",
     description=(
-        "Microservicio consumidor. Sin base de datos: agrega la informacion "
-        "de ms-residentes, ms-pagos y ms-incidencias en una ficha unica."
+        "Microservicio consumidor, sin base de datos. Agrega en una sola "
+        "respuesta la informacion de ms-residentes, ms-pagos y ms-incidencias.\n\n"
+        "Las llamadas salen en paralelo y cada bloque de la respuesta indica si "
+        "el servicio correspondiente estuvo disponible: si uno se cae, la ficha "
+        "se devuelve igual con esa seccion marcada."
     ),
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
+# Sin esto el navegador bloquea las llamadas del frontend en Amplify.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/health", tags=["health"])
-def health():
-    return {"status": "ok", "service": "ms-ficha-residente"}
-
-
-# TODO: app.include_router(...) por cada router de app/routers/
-# TODO: clientes httpx hacia los 3 microservicios en app/clients/
+app.include_router(salud.router)
+app.include_router(ficha.router)
