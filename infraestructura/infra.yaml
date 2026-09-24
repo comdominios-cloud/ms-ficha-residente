@@ -1,0 +1,696 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Sistema de Administracion de Condominios - CS2032 Cloud Computing, UTEC.
+  Recrea la infraestructura que se construyo a mano por la consola: las cuatro
+  maquinas EC2, los grupos de seguridad, el balanceador interno con su ruteo
+  por ruta, el VPC Link, el API Gateway, el bucket del data lake y la base del
+  catalogo de Glue.
+
+  Se apoya en la VPC y las subredes que ya existen en la cuenta del laboratorio
+  academico, porque ahi no se pueden crear VPC nuevas. Tampoco se crean roles
+  de IAM: se reutiliza LabRole, el unico que el laboratorio permite.
+
+# ------------------------------------------------------------------
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Red existente }
+        Parameters: [VpcId, SubredPrincipal, SubredSecundaria]
+      - Label: { default: Computo }
+        Parameters: [AmiId, ParDeClaves, IpAdministracion]
+      - Label: { default: Analitica }
+        Parameters: [NombreBucket, RolLaboratorio]
+
+# ------------------------------------------------------------------
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC donde vive todo. En el laboratorio es la VPC por defecto.
+
+  SubredPrincipal:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      Subred de las instancias y del balanceador. En el despliegue original
+      fue subnet-0ce7fa50be9b1eced, en us-east-1c.
+
+  SubredSecundaria:
+    Type: AWS::EC2::Subnet::Id
+    Description: >
+      Segunda subred, en otra zona de disponibilidad. Un balanceador de
+      aplicacion exige al menos dos.
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-08c6a4d8c4b64e1ce
+    Description: >
+      AMI propia con Ubuntu 22.04 y Docker ya instalado. Se creo a mano una
+      sola vez; CloudFormation no la genera, solo la usa.
+
+  ParDeClaves:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de claves para entrar por SSH a las instancias.
+
+  IpAdministracion:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      Desde donde se permite SSH. Conviene poner la IP propia con /32 en vez
+      de dejar el valor por defecto.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+  NombreBucket:
+    Type: String
+    Description: >
+      Bucket del data lake. Tiene que ser unico en todo AWS, por eso conviene
+      terminarlo con el numero de cuenta.
+
+  RolLaboratorio:
+    Type: String
+    Default: LabRole
+    Description: >
+      Rol que usa el crawler de Glue. En el laboratorio academico no se pueden
+      crear roles, asi que se reutiliza LabRole.
+
+# ------------------------------------------------------------------
+Resources:
+
+  # ============ GRUPOS DE SEGURIDAD ============
+  # El trafico entra solo por el API Gateway y va bajando: cada grupo acepta
+  # unicamente al de arriba. Ningun puerto de aplicacion queda abierto a
+  # internet.
+
+  SgVpcLink:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgc-vpclink
+      GroupDescription: Interfaz del VPC Link que usa el API Gateway
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Hacia el balanceador
+      Tags:
+        - { Key: Name, Value: sgc-vpclink }
+
+  SgAlb:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgc-alb
+      GroupDescription: Balanceador interno
+      VpcId: !Ref VpcId
+      Tags:
+        - { Key: Name, Value: sgc-alb }
+
+  # El balanceador solo acepta al VPC Link. Se declara aparte porque los dos
+  # grupos se referencian entre si y CloudFormation no admite ciclos.
+  SgAlbDesdeVpcLink:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgAlb
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref SgVpcLink
+      Description: HTTP 80 desde el VPC Link
+
+  SgProduccion:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgc-produccion
+      GroupDescription: Maquinas que corren los microservicios
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref IpAdministracion
+          Description: SSH de administracion
+      Tags:
+        - { Key: Name, Value: sgc-produccion }
+
+  # Los puertos publicados de los microservicios, solo desde el balanceador.
+  SgProduccionDesdeAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgProduccion
+      IpProtocol: tcp
+      FromPort: 9000
+      ToPort: 12000
+      SourceSecurityGroupId: !Ref SgAlb
+      Description: Rango del curso, solo desde el balanceador
+
+  SgIngesta:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgc-ingesta
+      GroupDescription: Maquina que corre los contenedores de ingesta
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref IpAdministracion
+          Description: SSH de administracion
+      Tags:
+        - { Key: Name, Value: sgc-ingesta }
+
+  SgBaseDatos:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgc-database
+      GroupDescription: Maquina con PostgreSQL, MySQL y MongoDB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref IpAdministracion
+          Description: SSH de administracion
+      Tags:
+        - { Key: Name, Value: sgc-database }
+
+  # Las tres bases aceptan solo a produccion y a ingesta. Nada desde internet.
+  SgBdPostgresProduccion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref SgProduccion
+      Description: PostgreSQL desde produccion
+
+  SgBdPostgresIngesta:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref SgIngesta
+      Description: PostgreSQL desde ingesta
+
+  SgBdMysqlProduccion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref SgProduccion
+      Description: MySQL desde produccion
+
+  SgBdMysqlIngesta:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref SgIngesta
+      Description: MySQL desde ingesta
+
+  SgBdMongoProduccion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId: !Ref SgProduccion
+      Description: MongoDB desde produccion
+
+  SgBdMongoIngesta:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgBaseDatos
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId: !Ref SgIngesta
+      Description: MongoDB desde ingesta
+
+  # ============ MAQUINAS VIRTUALES ============
+  # Las dos de produccion son identicas a proposito: el balanceador reparte
+  # entre ellas y tienen que responder lo mismo.
+
+  MaquinaProd01:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.micro
+      KeyName: !Ref ParDeClaves
+      SubnetId: !Ref SubredPrincipal
+      SecurityGroupIds: [!Ref SgProduccion]
+      Tags:
+        - { Key: Name, Value: condominio-prod-01 }
+        - { Key: Rol, Value: produccion }
+
+  MaquinaProd02:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.micro
+      KeyName: !Ref ParDeClaves
+      SubnetId: !Ref SubredPrincipal
+      SecurityGroupIds: [!Ref SgProduccion]
+      Tags:
+        - { Key: Name, Value: condominio-prod-02 }
+        - { Key: Rol, Value: produccion }
+
+  # Mas memoria porque levanta tres motores de base de datos a la vez.
+  MaquinaBaseDatos:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t2.small
+      KeyName: !Ref ParDeClaves
+      SubnetId: !Ref SubredPrincipal
+      SecurityGroupIds: [!Ref SgBaseDatos]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: false
+      Tags:
+        - { Key: Name, Value: condominio-db-01 }
+        - { Key: Rol, Value: base-de-datos }
+
+  MaquinaIngesta:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.small
+      KeyName: !Ref ParDeClaves
+      SubnetId: !Ref SubredPrincipal
+      SecurityGroupIds: [!Ref SgIngesta]
+      Tags:
+        - { Key: Name, Value: condominio-ingesta-01 }
+        - { Key: Rol, Value: ingesta }
+
+  # ============ BALANCEADOR ============
+  # Interno, no accesible desde internet: lo exige el enunciado. El unico
+  # recurso publico del sistema es el API Gateway.
+
+  Balanceador:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: alb-condominio
+      Type: application
+      Scheme: internal
+      SecurityGroups: [!Ref SgAlb]
+      Subnets:
+        - !Ref SubredPrincipal
+        - !Ref SubredSecundaria
+      Tags:
+        - { Key: Name, Value: alb-condominio }
+
+  # ============ GRUPOS DE DESTINO ============
+  # Uno por microservicio. Las dos maquinas de produccion se registran en
+  # todos: si una cae, el balanceador la saca y sigue con la otra.
+
+  GrupoResidentes:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-residentes
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9001
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9001 }
+        - { Id: !Ref MaquinaProd02, Port: 9001 }
+      Tags:
+        - { Key: Name, Value: tg-residentes }
+
+  GrupoUsuarios:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-usuarios
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9006
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9006 }
+        - { Id: !Ref MaquinaProd02, Port: 9006 }
+      Tags:
+        - { Key: Name, Value: tg-usuarios }
+
+  GrupoPagos:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-pagos
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9002
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9002 }
+        - { Id: !Ref MaquinaProd02, Port: 9002 }
+      Tags:
+        - { Key: Name, Value: tg-pagos }
+
+  GrupoIncidencias:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-incidencias
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9003
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9003 }
+        - { Id: !Ref MaquinaProd02, Port: 9003 }
+      Tags:
+        - { Key: Name, Value: tg-incidencias }
+
+  GrupoFicha:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-ficha
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9004
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9004 }
+        - { Id: !Ref MaquinaProd02, Port: 9004 }
+      Tags:
+        - { Key: Name, Value: tg-ficha }
+
+  GrupoAnalitico:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: tg-analitico
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 9005
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - { Id: !Ref MaquinaProd01, Port: 9005 }
+        - { Id: !Ref MaquinaProd02, Port: 9005 }
+      Tags:
+        - { Key: Name, Value: tg-analitico }
+
+  # ============ ESCUCHA Y REGLAS DE RUTEO ============
+  # Un solo puerto 80 para los seis microservicios: lo que decide el destino
+  # es la ruta de la peticion.
+
+  Escucha:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Balanceador
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoResidentes
+
+  # ms-pagos publica /unidades/{id}/estado-cuenta y ms-residentes
+  # publica /unidades. Sin esta regla, mas prioritaria, todo /unidades
+  # se iria a residentes y el endpoint de pagos quedaria inalcanzable.
+  ReglaEstadoCuenta:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 5
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/unidades/*/estado-cuenta'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoPagos
+
+  ReglaResidentes:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/residentes*'
+                - '/unidades*'
+                - '/edificios*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoResidentes
+
+  ReglaUsuarios:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/usuarios*'
+                - '/auth*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoUsuarios
+
+  ReglaPagos:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/cuotas*'
+                - '/pagos*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoPagos
+
+  ReglaFicha:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 40
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/ficha*'
+                - '/dependencias*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoFicha
+
+  ReglaIncidencias:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 50
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/incidencias*'
+                - '/reservas*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoIncidencias
+
+  ReglaAnalitico:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Escucha
+      Priority: 60
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+                - '/analitica*'
+                - '/athena*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrupoAnalitico
+
+  # ============ VPC LINK Y API GATEWAY ============
+  # El balanceador es privado, asi que el API Gateway no puede alcanzarlo por
+  # una URL: necesita un VPC Link, que es una interfaz de red dentro de la VPC.
+  # Este fue el punto que resolvio el bloqueo de contenido mixto: Amplify sirve
+  # por HTTPS y el balanceador habla HTTP, y el navegador rechaza esa mezcla.
+
+  EnlaceVpc:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: vpclink-condominio
+      SubnetIds:
+        - !Ref SubredPrincipal
+        - !Ref SubredSecundaria
+      SecurityGroupIds: [!Ref SgVpcLink]
+
+  Api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: api-condominio
+      ProtocolType: HTTP
+      Description: Unica entrada publica del sistema
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        AllowHeaders: ['*']
+        MaxAge: 600
+
+  IntegracionAlb:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref Api
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Ref Escucha
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref EnlaceVpc
+      PayloadFormatVersion: '1.0'
+
+  # Una sola ruta comodin: el reparto entre microservicios lo hace el
+  # balanceador, no el Gateway.
+  RutaComodin:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref Api
+      RouteKey: 'ANY /{proxy+}'
+      Target: !Sub 'integrations/${IntegracionAlb}'
+
+  Etapa:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref Api
+      StageName: $default
+      AutoDeploy: true
+
+  # ============ DATA LAKE ============
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref NombreBucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - { Key: Name, Value: data-lake-condominios }
+
+  CatalogoGlue:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: analiticas_de_condominio
+        Description: Catalogo de las tres bases volcadas a S3
+
+  # El crawler recorre raw/ y deduce las tablas solo. Usa LabRole porque el
+  # laboratorio academico no permite crear roles nuevos.
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: crawler-condominios
+      Role: !Ref RolLaboratorio
+      DatabaseName: !Ref CatalogoGlue
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${NombreBucket}/raw/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  GrupoTrabajoAthena:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: condominios
+      Description: Consultas sobre el data lake
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${NombreBucket}/athena-results/'
+
+# ------------------------------------------------------------------
+Outputs:
+
+  UrlApi:
+    Description: URL publica. Es la que va en VITE_API_BASE_URL de Amplify.
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com'
+
+  DnsBalanceador:
+    Description: DNS interno del balanceador. Solo resuelve dentro de la VPC.
+    Value: !GetAtt Balanceador.DNSName
+
+  IpProduccion01:
+    Description: IP privada de la primera maquina de produccion
+    Value: !GetAtt MaquinaProd01.PrivateIp
+
+  IpProduccion02:
+    Description: IP privada de la segunda maquina de produccion
+    Value: !GetAtt MaquinaProd02.PrivateIp
+
+  IpBaseDatos:
+    Description: >
+      IP privada de la maquina de bases. Es la que va en POSTGRES_HOST,
+      MYSQL_HOST y MONGO_HOST de cada microservicio.
+    Value: !GetAtt MaquinaBaseDatos.PrivateIp
+
+  IpIngesta:
+    Description: IP privada de la maquina de ingesta
+    Value: !GetAtt MaquinaIngesta.PrivateIp
+
+  BucketDataLake:
+    Description: Bucket del data lake
+    Value: !Ref Bucket
